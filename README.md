@@ -13,6 +13,12 @@
 - **自动添加 Trackers**: 为每个磁力链接附加一组预设的Trackers以提高下载速度。
 - **灵活配置**: 通过环境变量轻松配置 Alist 连接、下载路径、状态文件和更新频率。
 
+## Web UI
+
+此应用程序现在包含一个简单的 Web UI，用于显示服务的当前状态。您可以随时通过浏览器访问它，以查看最后成功下载的剧集编号。
+
+要访问 Web UI，请在浏览器中打开 `http://<your-host-ip>:5000`。
+
 ## 如何运行
 
 ### 1. 先决条件
@@ -49,6 +55,7 @@ docker build -t sbsubdown .
 以下是一个完整的 `docker run` 示例命令：
 ```bash
 docker run -d --restart=always \
+  -p 5000:5000 \
   -e ALIST_URL="http://your-alist-url:5244" \
   -e ALIST_USERNAME="your-username" \
   -e ALIST_PASSWORD="your-password" \
@@ -62,5 +69,6 @@ docker run -d --restart=always \
 
 **命令解释**:
 - `-d`: 在后台运行容器。
+- `-p 5000:5000`: 将主机的 5000 端口映射到容器的 5000 端口，以便您可以从外部访问 Web UI。
 - `--restart=always`: 容器退出时自动重启，确保服务持续运行。
 - `-v ./my_data:/data`: 将当前目录下的 `my_data` 文件夹挂载到容器的 `/data` 目录。这会使容器在 `my_data` 文件夹中创建 `last_episode.txt` 状态文件，从而在容器重启后保留下载进度。
