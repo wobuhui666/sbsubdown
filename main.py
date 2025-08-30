@@ -3,6 +3,8 @@ import requests
 import json
 import sys
 import time
+import threading
+from flask import Flask, render_template
 
 # 从环境变量获取 Alist 配置
 ALIST_URL = os.getenv("ALIST_URL")
@@ -28,6 +30,8 @@ TRACKERS_TO_ADD = (
     "&tr=https://tracker.moe.pm:443/announce"
 )
 
+app = Flask(__name__)
+
 def check_env_vars():
     """检查所需的环境变量是否已设置"""
     if not all([ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH]):
@@ -44,7 +48,7 @@ def get_alist_token():
         return response.json()["data"]["token"]
     except requests.exceptions.RequestException as e:
         print(f"获取 Alist token 失败: {e}")
-        sys.exit(1)
+        return None
 
 def add_offline_download(token, magnet_link, new_filename):
     """通过 Alist API 添加离线下载任务并指定文件名"""
@@ -125,11 +129,9 @@ def find_new_episodes(last_downloaded_episode):
     new_episodes.sort(key=lambda x: x[0])
     return new_episodes
 
-def main():
-    """主函数，包含无限循环用于定时检查"""
-    check_env_vars()
-    print("脚本启动...")
-
+def run_update_checker():
+    """后台运行的更新检查器"""
+    print("更新检查器线程已启动...")
     while True:
         print("-" * 30)
         last_episode = get_last_downloaded_episode()
@@ -151,7 +153,7 @@ def main():
                     magnet_found = False
                     for item in webrip_downloads:
                         if len(item) > 2 and item[1] == "简繁日MKV":
-                            magnet = item[2] + TRACKERS_TO_ADD
+                            magnet = item[2] + "".join(TRACKERS_TO_ADD)
                             official_episode_num = episode_info[0]
                             japanese_title = episode_info[2]
                             new_filename = f"{official_episode_num} {japanese_title}.mkv"
@@ -169,5 +171,23 @@ def main():
         print(f"所有任务处理完毕。等待 {UPDATE_INTERVAL_SECONDS} 秒后进行下一次检查...")
         time.sleep(UPDATE_INTERVAL_SECONDS)
 
+@app.route('/')
+def status_page():
+    """显示当前状态的 Web 页面"""
+    if os.path.exists(STATE_FILE_PATH):
+        with open(STATE_FILE_PATH, 'r') as f:
+            last_episode = f.read().strip()
+    else:
+        last_episode = "Not started yet"
+    return render_template('index.html', last_episode=last_episode)
+
 if __name__ == "__main__":
-    main()
+    check_env_vars()
+    print("脚本启动...")
+    
+    # 在后台线程中运行更新检查器
+    checker_thread = threading.Thread(target=run_update_checker, daemon=True)
+    checker_thread.start()
+    
+    # 启动 Flask web 服务器
+    app.run(host='0.0.0.0', port=5000)

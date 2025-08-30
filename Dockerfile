@@ -15,5 +15,8 @@ COPY main.py .
 # 为状态文件创建挂载点
 VOLUME /data
 
+# 暴露 Web UI 的端口
+EXPOSE 5000
+
 # 设置容器启动时要运行的命令
 CMD ["python", "main.py"]
