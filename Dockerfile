@@ -12,6 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 将主应用程序代码复制到工作目录
 COPY main.py .
+# 为状态文件创建挂载点
+VOLUME /data
 
 # 设置容器启动时要运行的命令
 CMD ["python", "main.py"]

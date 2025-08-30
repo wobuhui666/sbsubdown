@@ -1,15 +1,17 @@
 # 自动下载最新动漫剧集到 Alist
 
-这是一个Docker化的Python应用程序，它可以自动从指定的数据源获取最新的“电视动画”剧集，提取特定格式的磁力链接，并将其添加到Alist进行离线下载。
+这是一个Docker化的Python应用程序，它可以自动从指定的数据源获取最新的“电视动画”剧集，并将其添加到Alist进行离线下载。
+
+此脚本现在支持**定时追新**、**断点续传**和**自动重命名**功能。
 
 ## 功能
 
-- 从 `https://cloud.sbsub.com/data/data.json` 获取最新的动漫数据。
-- 自动识别并筛选出最新一集（支持小数集数）。
-- 忽略标题中包含特定标记（`（本集未被日本官网计入总集数）`）的剧集。
-- 提取 `简繁日MKV` 格式的磁力链接。
-- 自动为磁力链接添加一组预设的Trackers。
-- 通过Alist API将处理后的磁力链接添加到离线下载任务中。
+- **定时检查**: 定期从 `https://cloud.sbsub.com/data/data.json` 获取最新的动漫数据。
+- **断点续传**: 自动记录上次成功下载的集数，并在下次启动时从下一集开始下载，避免重复。
+- **自动追新**: 自动发现所有未下载的新剧集，并按顺序将它们添加到下载队列。
+- **文件重命名**: 根据剧集的官方集数和日语标题，将下载的文件重命名为更清晰的格式 (例如: `1231 有鬼啊！.mkv`)。
+- **自动添加 Trackers**: 为每个磁力链接附加一组预设的Trackers以提高下载速度。
+- **灵活配置**: 通过环境变量轻松配置 Alist 连接、下载路径、状态文件和更新频率。
 
 ## 如何运行
 
@@ -20,31 +22,45 @@
 
 ### 2. 配置
 
-在运行容器之前，您需要设置以下环境变量来配置Alist连接信息：
+在运行容器之前，您需要设置以下环境变量：
 
+#### 必要环境变量:
 - `ALIST_URL`: 您的Alist实例地址 (例如: `http://192.168.1.10:5244`)。
 - `ALIST_USERNAME`: 您的Alist用户名。
 - `ALIST_PASSWORD`: 您的Alist密码。
 
-### 3. 构建并运行 Docker 容器
+#### 可选环境变量 (推荐配置):
+- `DOWNLOAD_PATH`: 在 Alist 中保存下载文件的路径 (默认: `/downloads/conan`)。
+- `STATE_FILE_PATH`: 用于存储最后下载集数的状态文件的路径 (默认: `/data/last_episode.txt`)。**强烈建议将其持久化**。
+- `START_EPISODE`: 如果状态文件不存在，从该集数开始下载 (默认: `0`)。
+- `UPDATE_INTERVAL_SECONDS`: 每次检查新剧集之间的时间间隔（秒）(默认: `3600`)。
 
-您可以使用以下命令来构建和运行此应用程序的Docker容器。
+### 3. 构建并运行 Docker 容器
 
 #### 构建镜像
 在项目根目录下（与 `Dockerfile` 文件位于同一目录），运行以下命令来构建Docker镜像：
 ```bash
-docker build -t alist-downloader .
+docker build -t sbsubdown .
 ```
 
 #### 运行容器
-使用上一步构建的镜像来运行容器，并通过 `-e` 参数传入所需的环境变量：
+使用上一步构建的镜像来运行容器。为了持久化下载状态，**强烈建议**使用 `-v` 参数挂载一个本地目录到容器的 `/data` 目录。
+
+以下是一个完整的 `docker run` 示例命令：
 ```bash
-docker run --rm \
+docker run -d --restart=always \
   -e ALIST_URL="http://your-alist-url:5244" \
   -e ALIST_USERNAME="your-username" \
   -e ALIST_PASSWORD="your-password" \
-  alist-downloader
+  -e DOWNLOAD_PATH="/downloads/conan" \
+  -e UPDATE_INTERVAL_SECONDS="1800" \
+  -v ./my_data:/data \
+  --name sbsubdown \
+  sbsubdown
 ```
-将 `"http://your-alist-url:5244"`, `"your-username"`, 和 `"your-password"` 替换为您的实际Alist配置。
+将环境变量和 `./my_data` 替换为您的实际配置。
 
-`--rm` 参数会在容器执行完毕后自动删除它，适合一次性任务。如果您希望定期运行，可以考虑使用 `cron` 或其他调度工具来执行 `docker run` 命令。
+**命令解释**:
+- `-d`: 在后台运行容器。
+- `--restart=always`: 容器退出时自动重启，确保服务持续运行。
+- `-v ./my_data:/data`: 将当前目录下的 `my_data` 文件夹挂载到容器的 `/data` 目录。这会使容器在 `my_data` 文件夹中创建 `last_episode.txt` 状态文件，从而在容器重启后保留下载进度。
