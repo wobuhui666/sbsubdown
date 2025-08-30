@@ -11,9 +11,11 @@ ALIST_URL = os.getenv("ALIST_URL")
 ALIST_USERNAME = os.getenv("ALIST_USERNAME")
 ALIST_PASSWORD = os.getenv("ALIST_PASSWORD")
 DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH", "/downloads/conan")
-STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "/data/last_episode.txt")
+STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "/data/state.json")
 START_EPISODE = int(os.getenv("START_EPISODE", 0))
 UPDATE_INTERVAL_SECONDS = int(os.getenv("UPDATE_INTERVAL_SECONDS", 3600))
+ALIST_TOOL = os.getenv("ALIST_TOOL", "aria2")
+ALIST_DELETE_POLICY = os.getenv("ALIST_DELETE_POLICY", "delete_on_upload_succeed")
 
 # 数据源 URL 和 Tracker 列表
 DATA_URL = "https://cloud.sbsub.com/data/data.json"
@@ -50,30 +52,34 @@ def get_alist_token():
         print(f"获取 Alist token 失败: {e}")
         return None
 
-def add_offline_download(token, magnet_link, file_path):
+def add_offline_download(token, magnet_link):
     """通过 Alist API 添加离线下载任务并返回任务 ID"""
     download_url = f"{ALIST_URL}/api/fs/add_offline_download"
     headers = {"Authorization": token}
-    payload = {"path": file_path, "url": magnet_link}
+    payload = {
+        "path": DOWNLOAD_PATH,
+        "urls": [magnet_link],
+        "tool": ALIST_TOOL,
+        "delete_policy": ALIST_DELETE_POLICY
+    }
     try:
         response = requests.post(download_url, headers=headers, json=payload)
         response.raise_for_status()
-        # 假设成功响应中包含任务 ID
-        task_id = response.json().get("data", {}).get("task_id")
+        response_data = response.json()
+        
+        # 根据新的 API 格式提取任务 ID
+        task_id = response_data.get("data", {}).get("tasks", [{}])[0].get("id")
+        
         if task_id:
-            print(f"成功将任务 '{os.path.basename(file_path)}' 添加到 Alist，任务ID: {task_id}")
+            print(f"成功将任务添加到 Alist 目录 '{DOWNLOAD_PATH}'，任务ID: {task_id}")
             return task_id
         else:
-            # Alist V2 和 V3 返回的格式不同
-            if response.json().get('message') == 'success':
-                 print(f"成功将任务 '{os.path.basename(file_path)}' 添加到 Alist，但未返回任务ID（可能为Alist V2）。")
-                 return "unknown_v2_task" # 返回一个特殊标识符
-            print(f"添加下载任务 '{os.path.basename(file_path)}' 成功，但响应中未找到任务 ID。")
+            print(f"添加下载任务成功，但响应中未找到任务 ID。")
             print(f"服务器响应: {response.text}")
             return None
     except requests.exceptions.RequestException as e:
-        print(f"添加 '{os.path.basename(file_path)}' 到 Alist 离线下载失败: {e}")
-        if response and response.text:
+        print(f"添加 Alist 离线下载失败: {e}")
+        if 'response' in locals() and response.text:
             print(f"服务器响应: {response.text}")
         return None
 
@@ -91,6 +97,31 @@ def get_offline_download_tasks(token):
     except json.JSONDecodeError:
         print("解析 Alist 任务列表失败。")
         return None
+
+def rename_file(token, original_name, new_name):
+    """通过 Alist API 重命名文件"""
+    rename_url = f"{ALIST_URL}/api/fs/rename"
+    headers = {"Authorization": token}
+    payload = {
+        "src_dir": DOWNLOAD_PATH,
+        "name": original_name,
+        "new_name": new_name
+    }
+    try:
+        response = requests.post(rename_url, headers=headers, json=payload)
+        response.raise_for_status()
+        if response.json().get("code") == 200:
+            print(f"成功将 '{original_name}' 重命名为 '{new_name}'")
+            return True
+        else:
+            print(f"重命名文件 '{original_name}' 失败。")
+            print(f"服务器响应: {response.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"重命名文件 API 请求失败: {e}")
+        if 'response' in locals() and response.text:
+            print(f"服务器响应: {response.text}")
+        return False
 
 def load_state():
     """从 state.json 加载状态，如果不存在则创建"""
@@ -141,7 +172,7 @@ def find_new_episodes(last_completed_episode):
 
         try:
             current_episode_num = float(episode_num_str)
-            if current_episode_num > last_downloaded_episode:
+            if current_episode_num > last_completed_episode:
                 new_episodes.append((current_episode_num, value))
         except ValueError:
             print(f"警告：无法解析集数 '{episode_num_str}'，已跳过。")
@@ -191,20 +222,19 @@ def run_update_checker():
                         magnet = item[2] + "".join(TRACKERS_TO_ADD)
                         official_episode_num = episode_info[0]
                         japanese_title = episode_info[2]
-                        filename = f"{official_episode_num} {japanese_title}.mkv"
-                        file_path = f"{DOWNLOAD_PATH}/{filename}"
+                        desired_filename = f"{official_episode_num} {japanese_title}.mkv"
                         
-                        print(f"处理新剧集: {filename}")
-                        task_id = add_offline_download(token, magnet, file_path)
+                        print(f"处理新剧集，期望文件名: {desired_filename}")
+                        task_id = add_offline_download(token, magnet)
                         
                         if task_id:
                             pending_tasks.append({
                                 "task_id": task_id,
                                 "episode_number": episode_num,
-                                "file_path": file_path
+                                "desired_filename": desired_filename
                             })
                             save_state({**state, "pending_tasks": pending_tasks})
-                            print(f"剧集 {episode_num} 已添加到待处理列表。")
+                            print(f"剧集 {episode_num} (任务ID: {task_id}) 已添加到待处理列表。")
                             magnet_found = True
                             break
                 
@@ -241,9 +271,26 @@ def run_update_checker():
 
                     status = alist_task.get("status")
                     if status == "done":
-                        print(f"确认：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 已下载完成。")
-                        tasks_to_remove.append(task)
-                        state_changed = True
+                        original_filename = alist_task.get("name")
+                        desired_filename = task.get("desired_filename")
+                        
+                        print(f"确认：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 已下载完成。原始文件名: '{original_filename}'")
+
+                        # 执行重命名
+                        if original_filename and desired_filename and original_filename != desired_filename:
+                            print(f"准备将 '{original_filename}' 重命名为 '{desired_filename}'...")
+                            rename_success = rename_file(token, original_filename, desired_filename)
+                            if rename_success:
+                                # 只有重命名成功后才移除任务
+                                tasks_to_remove.append(task)
+                                state_changed = True
+                            else:
+                                print(f"重命名失败，任务 {task['task_id']} 将在下次检查时重试。")
+                        else:
+                            # 如果不需要重命名，也视为成功
+                            tasks_to_remove.append(task)
+                            state_changed = True
+
                     elif status == "error":
                         print(f"错误：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 下载失败。错误信息: {alist_task.get('error')}")
                         tasks_to_remove.append(task)
@@ -281,7 +328,8 @@ def status_page():
     """显示当前状态的 Web 页面"""
     state = load_state()
     last_completed_episode = state.get('last_completed_episode', 'N/A')
-    return render_template('index.html', last_episode=last_completed_episode)
+    pending_tasks = state.get('pending_tasks', [])
+    return render_template('index.html', last_episode=last_completed_episode, pending_tasks=pending_tasks)
 
 if __name__ == "__main__":
     check_env_vars()

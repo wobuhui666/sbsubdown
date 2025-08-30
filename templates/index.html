@@ -6,7 +6,30 @@
 </head>
 <body>
     <h1>Conan Updater Status</h1>
-    <p>Last successfully downloaded episode number: <strong>{{ last_episode }}</strong></p>
-    <p>Next check will be performed shortly.</p>
+    <p>最后确认下载完成的集数: <strong>{{ last_episode }}</strong></p>
+    
+    <h2>待处理的任务列表</h2>
+    {% if pending_tasks %}
+        <table border="1" style="width:100%; border-collapse: collapse;">
+            <thead>
+                <tr>
+                    <th style="padding: 8px; text-align: left;">剧集号</th>
+                    <th style="padding: 8px; text-align: left;">期望文件名</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for task in pending_tasks %}
+                <tr>
+                    <td style="padding: 8px;">{{ task.episode_number }}</td>
+                    <td style="padding: 8px;">{{ task.desired_filename }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>当前没有待处理的任务。</p>
+    {% endif %}
+
+    <p style="margin-top: 20px;">服务正在后台运行，将定时检查更新。</p>
 </body>
 </html>

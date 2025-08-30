@@ -36,8 +36,10 @@
 - `ALIST_PASSWORD`: 您的Alist密码。
 
 #### 可选环境变量 (推荐配置):
-- `DOWNLOAD_PATH`: 在 Alist 中保存下载文件的路径 (默认: `/downloads/conan`)。
+- `DOWNLOAD_PATH`: 在 Alist 中用于保存下载文件的**目录路径** (默认: `/downloads/conan`)。**必须是目录**。
 - `STATE_FILE_PATH`: 用于存储下载状态的 `state.json` 文件的路径 (默认: `/data/state.json`)。**强烈建议将其持久化**。
+- `ALIST_TOOL`: 用于离线下载的工具 (默认: `aria2`)。例如: `aria2` 或 `qBittorrent`。
+- `ALIST_DELETE_POLICY`: 下载任务的删除策略 (默认: `delete_on_upload_succeed`)。
 - `START_EPISODE`: 如果状态文件不存在，从该集数开始下载 (默认: `0`)。
 - `UPDATE_INTERVAL_SECONDS`: 每次检查新剧集之间的时间间隔（秒）(默认: `3600`)。
 
@@ -60,6 +62,7 @@ docker run -d --restart=always \
   -e ALIST_USERNAME="your-username" \
   -e ALIST_PASSWORD="your-password" \
   -e DOWNLOAD_PATH="/downloads/conan" \
+  -e ALIST_TOOL="aria2" \
   -e UPDATE_INTERVAL_SECONDS="1800" \
   -v ./my_data:/data \
   --name sbsubdown \
