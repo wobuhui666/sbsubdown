@@ -50,52 +50,74 @@ def get_alist_token():
         print(f"获取 Alist token 失败: {e}")
         return None
 
-def add_offline_download(token, magnet_link, new_filename):
-    """通过 Alist API 添加离线下载任务并指定文件名"""
+def add_offline_download(token, magnet_link, file_path):
+    """通过 Alist API 添加离线下载任务并返回任务 ID"""
     download_url = f"{ALIST_URL}/api/fs/add_offline_download"
     headers = {"Authorization": token}
-    # Alist API payload，同时指定路径和磁力链接
-    payload = {"path": f"{DOWNLOAD_PATH}/{new_filename}", "url": magnet_link}
+    payload = {"path": file_path, "url": magnet_link}
     try:
         response = requests.post(download_url, headers=headers, json=payload)
         response.raise_for_status()
-        print(f"成功将任务 '{new_filename}' 添加到 Alist 离线下载。")
-        print(f"响应: {response.json().get('message')}")
-        return True
+        # 假设成功响应中包含任务 ID
+        task_id = response.json().get("data", {}).get("task_id")
+        if task_id:
+            print(f"成功将任务 '{os.path.basename(file_path)}' 添加到 Alist，任务ID: {task_id}")
+            return task_id
+        else:
+            # Alist V2 和 V3 返回的格式不同
+            if response.json().get('message') == 'success':
+                 print(f"成功将任务 '{os.path.basename(file_path)}' 添加到 Alist，但未返回任务ID（可能为Alist V2）。")
+                 return "unknown_v2_task" # 返回一个特殊标识符
+            print(f"添加下载任务 '{os.path.basename(file_path)}' 成功，但响应中未找到任务 ID。")
+            print(f"服务器响应: {response.text}")
+            return None
     except requests.exceptions.RequestException as e:
-        print(f"添加 '{new_filename}' 到 Alist 离线下载失败: {e}")
-        # 检查响应是否存在，以及是否包含文本
+        print(f"添加 '{os.path.basename(file_path)}' 到 Alist 离线下载失败: {e}")
         if response and response.text:
             print(f"服务器响应: {response.text}")
-        return False
+        return None
 
-def get_last_downloaded_episode():
-    """从状态文件读取最后下载的集数"""
+def get_offline_download_tasks(token):
+    """获取 Alist 中的所有离线下载任务"""
+    tasks_url = f"{ALIST_URL}/api/fs/offline_download_tasks"
+    headers = {"Authorization": token}
     try:
-        if os.path.exists(STATE_FILE_PATH) and os.path.getsize(STATE_FILE_PATH) > 0:
+        response = requests.get(tasks_url, headers=headers)
+        response.raise_for_status()
+        return response.json().get("data", [])
+    except requests.exceptions.RequestException as e:
+        print(f"获取 Alist 离线任务列表失败: {e}")
+        return None
+    except json.JSONDecodeError:
+        print("解析 Alist 任务列表失败。")
+        return None
+
+def load_state():
+    """从 state.json 加载状态，如果不存在则创建"""
+    if os.path.exists(STATE_FILE_PATH):
+        try:
             with open(STATE_FILE_PATH, 'r') as f:
-                content = f.read().strip()
-                return float(content)
-        else:
-            print(f"状态文件 '{STATE_FILE_PATH}' 不存在或为空，将从第 {START_EPISODE} 集开始。")
-            return float(START_EPISODE)
-    except (IOError, ValueError) as e:
-        print(f"读取或解析状态文件失败: {e}。将使用起始集数 {START_EPISODE}。")
-        return float(START_EPISODE)
+                return json.load(f)
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"读取或解析状态文件失败: {e}。将使用默认状态。")
+    
+    # 默认状态
+    return {
+        "last_completed_episode": float(START_EPISODE),
+        "pending_tasks": []
+    }
 
-def update_state_file(episode_number):
-    """更新状态文件，写入新的集数"""
+def save_state(state):
+    """将状态保存到 state.json"""
     try:
-        # 确保目录存在
         os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True)
         with open(STATE_FILE_PATH, 'w') as f:
-            f.write(str(episode_number))
-        print(f"状态文件已更新，最新集数: {episode_number}")
+            json.dump(state, f, indent=2)
     except IOError as e:
         print(f"错误：无法写入状态文件 '{STATE_FILE_PATH}': {e}")
         sys.exit(1)
 
-def find_new_episodes(last_downloaded_episode):
+def find_new_episodes(last_completed_episode):
     """获取数据并找到所有比记录新的剧集"""
     print("正在从数据源获取最新剧集列表...")
     try:
@@ -130,56 +152,136 @@ def find_new_episodes(last_downloaded_episode):
     return new_episodes
 
 def run_update_checker():
-    """后台运行的更新检查器"""
+    """后台运行的更新检查器，采用“添加并验证”模式"""
     print("更新检查器线程已启动...")
     while True:
         print("-" * 30)
-        last_episode = get_last_downloaded_episode()
-        print(f"当前记录的最新集数是: {last_episode}")
+        state = load_state()
+        last_completed_episode = state.get("last_completed_episode", float(START_EPISODE))
+        pending_tasks = state.get("pending_tasks", [])
         
-        new_episodes = find_new_episodes(last_episode)
+        print(f"当前最后确认完成的集数是: {last_completed_episode}")
+        print(f"有 {len(pending_tasks)} 个任务待处理。")
+
+        token = get_alist_token()
+        if not token:
+            print("无法获取 Alist token，将在下次检查时重试。")
+            time.sleep(UPDATE_INTERVAL_SECONDS)
+            continue
+
+        # --- 阶段一：检查并添加新剧集 ---
+        print("\n--- 阶段一：检查并添加新剧集 ---")
+        new_episodes = find_new_episodes(last_completed_episode)
 
         if not new_episodes:
-            print("未发现新剧集。")
+            print("未发现需要下载的新剧集。")
         else:
-            print(f"发现 {len(new_episodes)} 个新剧集，准备处理...")
-            token = get_alist_token()
-            if not token:
-                print("无法获取 Alist token，将在下次检查时重试。")
+            print(f"发现 {len(new_episodes)} 个新剧集，准备添加到 Alist...")
+            for episode_num, episode_info in new_episodes:
+                # 检查任务是否已在 pending_tasks 中
+                if any(p.get('episode_number') == episode_num for p in pending_tasks):
+                    print(f"剧集 {episode_num} 已在待处理列表中，跳过添加。")
+                    continue
+
+                downloads = episode_info[7]
+                webrip_downloads = downloads.get("WEBRIP", [])
+                magnet_found = False
+                for item in webrip_downloads:
+                    if len(item) > 2 and item[1] == "简繁日MKV":
+                        magnet = item[2] + "".join(TRACKERS_TO_ADD)
+                        official_episode_num = episode_info[0]
+                        japanese_title = episode_info[2]
+                        filename = f"{official_episode_num} {japanese_title}.mkv"
+                        file_path = f"{DOWNLOAD_PATH}/{filename}"
+                        
+                        print(f"处理新剧集: {filename}")
+                        task_id = add_offline_download(token, magnet, file_path)
+                        
+                        if task_id:
+                            pending_tasks.append({
+                                "task_id": task_id,
+                                "episode_number": episode_num,
+                                "file_path": file_path
+                            })
+                            save_state({**state, "pending_tasks": pending_tasks})
+                            print(f"剧集 {episode_num} 已添加到待处理列表。")
+                            magnet_found = True
+                            break
+                
+                if not magnet_found:
+                    print(f"警告: 在剧集 {episode_num} 中未找到 '简繁日MKV' 格式的下载链接。")
+        
+        # --- 阶段二：检查待处理任务的状态 ---
+        print("\n--- 阶段二：检查待处理任务的状态 ---")
+        if not pending_tasks:
+            print("没有待处理的任务需要检查。")
+        else:
+            alist_tasks = get_offline_download_tasks(token)
+            if alist_tasks is None:
+                print("无法获取 Alist 任务列表，将在下次检查时重试。")
             else:
-                for episode_num, episode_info in new_episodes:
-                    downloads = episode_info[7]
-                    webrip_downloads = downloads.get("WEBRIP", [])
-                    magnet_found = False
-                    for item in webrip_downloads:
-                        if len(item) > 2 and item[1] == "简繁日MKV":
-                            magnet = item[2] + "".join(TRACKERS_TO_ADD)
-                            official_episode_num = episode_info[0]
-                            japanese_title = episode_info[2]
-                            new_filename = f"{official_episode_num} {japanese_title}.mkv"
-                            
-                            print(f"处理新剧集: {new_filename}")
+                tasks_to_remove = []
+                state_changed = False
+                
+                # 创建一个任务ID到任务对象的映射以便快速查找
+                alist_tasks_map = {task.get('id'): task for task in alist_tasks}
 
-                            if add_offline_download(token, magnet, new_filename):
-                                update_state_file(episode_num)
-                                magnet_found = True
-                                break
+                for task in pending_tasks:
+                    alist_task = alist_tasks_map.get(task["task_id"])
                     
-                    if not magnet_found:
-                        print(f"警告: 在剧集 {episode_num} 中未找到 '简繁日MKV' 格式的下载链接。")
+                    if not alist_task:
+                        # 对于 V2 添加的任务，我们无法验证，只能假设成功
+                        if task["task_id"] == "unknown_v2_task":
+                            print(f"警告：无法验证来自 Alist V2 的任务 (剧集 {task['episode_number']})，假设其已完成。")
+                            tasks_to_remove.append(task)
+                            state_changed = True
+                        else:
+                            print(f"警告：在 Alist 任务列表中未找到任务ID '{task['task_id']}' (剧集 {task['episode_number']})。可能已被手动删除。")
+                        continue
 
-        print(f"所有任务处理完毕。等待 {UPDATE_INTERVAL_SECONDS} 秒后进行下一次检查...")
+                    status = alist_task.get("status")
+                    if status == "done":
+                        print(f"确认：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 已下载完成。")
+                        tasks_to_remove.append(task)
+                        state_changed = True
+                    elif status == "error":
+                        print(f"错误：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 下载失败。错误信息: {alist_task.get('error')}")
+                        tasks_to_remove.append(task)
+                        state_changed = True
+                    else:
+                        print(f"状态：剧集 {task['episode_number']} 仍在下载中 (状态: {status})。")
+
+                if state_changed:
+                    # 更新 pending_tasks 列表
+                    state["pending_tasks"] = [p for p in pending_tasks if p not in tasks_to_remove]
+                    
+                    # 获取所有已完成的剧集号（包括新完成的和之前已完成的）
+                    completed_episodes = {state["last_completed_episode"]}
+                    for removed_task in tasks_to_remove:
+                        alist_task = alist_tasks_map.get(removed_task["task_id"])
+                        # 只有状态为 'done' 或 V2 的未知任务才算完成
+                        if (alist_task and alist_task.get("status") == "done") or removed_task["task_id"] == "unknown_v2_task":
+                             completed_episodes.add(removed_task["episode_number"])
+
+                    # 更新 last_completed_episode
+                    if completed_episodes:
+                        new_last_completed = max(completed_episodes)
+                        if new_last_completed > state["last_completed_episode"]:
+                            state["last_completed_episode"] = new_last_completed
+                            print(f"更新最后完成的集数为: {new_last_completed}")
+
+                    save_state(state)
+                    print("状态文件已更新。")
+
+        print(f"\n所有检查完成。等待 {UPDATE_INTERVAL_SECONDS} 秒后进行下一次检查...")
         time.sleep(UPDATE_INTERVAL_SECONDS)
 
 @app.route('/')
 def status_page():
     """显示当前状态的 Web 页面"""
-    if os.path.exists(STATE_FILE_PATH):
-        with open(STATE_FILE_PATH, 'r') as f:
-            last_episode = f.read().strip()
-    else:
-        last_episode = "Not started yet"
-    return render_template('index.html', last_episode=last_episode)
+    state = load_state()
+    last_completed_episode = state.get('last_completed_episode', 'N/A')
+    return render_template('index.html', last_episode=last_completed_episode)
 
 if __name__ == "__main__":
     check_env_vars()
