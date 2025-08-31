@@ -8,12 +8,14 @@ import logging
 import functools
 from flask import Flask, render_template
 
-# --- 1. 配置模块 (无变化) ---
+# --- 1. 配置模块 (已更新) ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 ALIST_URL = os.getenv("ALIST_URL")
 ALIST_USERNAME = os.getenv("ALIST_USERNAME")
 ALIST_PASSWORD = os.getenv("ALIST_PASSWORD")
-DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH", "/downloads/conan")
+DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH")
+# 新增：必须设置你的 Alist 存储的根挂载路径，例如 "/al" 或 "/media"
+ALIST_MOUNT_PATH = os.getenv("ALIST_MOUNT_PATH")
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "/data/state.json")
 START_EPISODE = int(os.getenv("START_EPISODE", 0))
 IDLE_CHECK_INTERVAL_SECONDS = int(os.getenv("IDLE_CHECK_INTERVAL_SECONDS", 3600))
@@ -38,10 +40,11 @@ def retry_on_failure(retries=3, delay=5, allowed_exceptions=(requests.exceptions
         return wrapper
     return decorator
 
-# --- 3. 核心功能函数 (检查逻辑已更新) ---
+# --- 3. 核心功能函数 (多处已更新) ---
 def check_env_vars():
-    if not all([ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH]):
-        logging.error("环境变量 ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH 必须全部设置。"); sys.exit(1)
+    # 更新：增加了对 ALIST_MOUNT_PATH 的检查
+    if not all([ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH, ALIST_MOUNT_PATH]):
+        logging.error("环境变量 ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH, ALIST_MOUNT_PATH 必须全部设置。"); sys.exit(1)
 
 @retry_on_failure(retries=3, delay=3)
 def _get_task_list_from_v4_api(token, endpoint_url):
@@ -55,9 +58,6 @@ def _get_task_list_from_v4_api(token, endpoint_url):
         logging.error(f"解析 Alist 任务列表失败！URL: {endpoint_url}"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
 
 def get_completed_transfer_tasks(token):
-    """
-    新函数：只获取已完成的“离线下载转存”任务列表。
-    """
     logging.info("正在检查已完成的转存任务列表...")
     transfer_done_url = f"{ALIST_URL}/api/task/offline_download_transfer/done"
     tasks = _get_task_list_from_v4_api(token, transfer_done_url)
@@ -65,12 +65,12 @@ def get_completed_transfer_tasks(token):
         logging.info(f"成功获取到 {len(tasks)} 个已完成的转存任务。")
     return tasks
 
-# ... 其他 get_alist_token, add_offline_download 等函数保持不变，此处省略以保持简洁 ...
 @retry_on_failure(retries=3, delay=5)
 def get_alist_token():
     login_url = f"{ALIST_URL}/api/auth/login"; payload = {"username": ALIST_USERNAME, "password": ALIST_PASSWORD}
     try: response = requests.post(login_url, json=payload, timeout=10); response.raise_for_status(); return response.json()["data"]["token"]
     except json.JSONDecodeError: logging.error(f"解析 Alist token 失败！"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
+
 @retry_on_failure(retries=3, delay=3)
 def add_offline_download(token, magnet_link):
     download_url = f"{ALIST_URL}/api/fs/add_offline_download"; headers = {"Authorization": token}; payload = {"path": DOWNLOAD_PATH, "urls": [magnet_link], "tool": ALIST_TOOL, "delete_policy": ALIST_DELETE_POLICY}
@@ -79,6 +79,7 @@ def add_offline_download(token, magnet_link):
         if task_id: logging.info(f"成功将任务添加到 Alist 目录 '{DOWNLOAD_PATH}'，任务ID: {task_id}"); return task_id
         logging.warning(f"添加下载任务成功，但响应中未找到任务 ID。响应: {response.text}"); return None
     except json.JSONDecodeError: logging.error(f"解析 Alist 添加任务响应失败！"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
+
 @retry_on_failure(retries=3, delay=2)
 def list_files(token, path):
     list_url = f"{ALIST_URL}/api/fs/list"; headers = {"Authorization": token}; payload = {"path": path, "page": 1, "per_page": 0}
@@ -89,34 +90,72 @@ def list_files(token, path):
         if response_data.get("code") == 200: return response_data.get("data", {}).get("content", [])
         logging.error(f"列出目录 '{path}' 文件失败。服务器响应: {response.text}"); return None
     except json.JSONDecodeError: logging.error(f"解析 Alist 目录列表失败！"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
+
+# 更新：最关键的修复，重写 rename_file 函数
 @retry_on_failure(retries=3, delay=2)
 def rename_file(token, src_directory, original_name, new_name):
-    rename_url = f"{ALIST_URL}/api/fs/rename"; headers = {"Authorization": token}; payload = {"src_dir": src_directory, "name": original_name, "new_name": new_name}
+    """
+    增强版重命名函数：自动规范化源目录路径，确保其包含挂载点。
+    """
+    # --- 新增的路径规范化逻辑 ---
+    normalized_src_dir = src_directory
+    # 确保 ALIST_MOUNT_PATH 结尾没有斜杠，以避免拼接时产生双斜杠
+    mount_path_stripped = ALIST_MOUNT_PATH.rstrip('/')
+    
+    # 检查传入的目录是否已经以正确的挂载路径开头
+    if not src_directory.startswith(mount_path_stripped + '/') and src_directory != mount_path_stripped:
+        # 如果不是，则强制将它们拼接起来
+        src_dir_stripped = src_directory.lstrip('/')
+        normalized_src_dir = f"{mount_path_stripped}/{src_dir_stripped}"
+        logging.warning(f"检测到原始 src_dir '{src_directory}' 不规范，已自动修正为: '{normalized_src_dir}'")
+    # --- 逻辑结束 ---
+
+    rename_url = f"{ALIST_URL}/api/fs/rename"
+    headers = {"Authorization": token}
+    # 使用修正后的路径
+    payload = {"src_dir": normalized_src_dir, "name": original_name, "new_name": new_name}
+    
     try:
-        response = requests.post(rename_url, headers=headers, json=payload, timeout=10); response.raise_for_status()
-        if response.json().get("code") == 200: logging.info(f"成功将 '{original_name}' 重命名为 '{new_name}'"); return True
-        logging.error(f"重命名文件 '{original_name}' 失败。服务器响应: {response.text}"); return False
-    except json.JSONDecodeError: logging.error(f"解析 Alist 重命名响应失败！"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
+        # 增加日志，打印出最终发送给 Alist 的载荷
+        logging.info(f"正在发送重命名请求到 Alist，载荷: {json.dumps(payload)}")
+        
+        response = requests.post(rename_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        response_data = response.json() # 提前解析json
+        if response_data.get("code") == 200:
+            logging.info(f"成功将 '{original_name}' 重命名为 '{new_name}'")
+            return True
+        # 如果code不是200，也记录详细信息
+        logging.error(f"重命名文件 '{original_name}' 失败。服务器响应: {response.text}")
+        return False
+    except json.JSONDecodeError:
+        logging.error(f"解析 Alist 重命名响应失败！")
+        logging.error(f"服务器状态码: {response.status_code}")
+        logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}")
+        raise
+
 def load_state():
     if os.path.exists(STATE_FILE_PATH):
         try:
             with open(STATE_FILE_PATH, 'r') as f: return json.load(f)
         except (IOError, json.JSONDecodeError) as e: logging.warning(f"读取或解析状态文件失败: {e}。将使用默认状态。")
     return {"last_completed_episode": float(START_EPISODE), "pending_tasks": []}
+
+# 更新：修复了 IndentationError
 def save_state(state):
     try:
-        # 确保目录存在
         os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True)
-        # 写入状态文件，注意这里的缩进和上一行是一致的
         with open(STATE_FILE_PATH, 'w') as f:
             json.dump(state, f, indent=2)
     except IOError as e:
         logging.error(f"无法写入状态文件 '{STATE_FILE_PATH}': {e}")
         sys.exit(1)
+
 @retry_on_failure(retries=3, delay=10)
 def fetch_data_from_source(url):
     try: response = requests.get(url, timeout=15); response.raise_for_status(); return response.json()
     except json.JSONDecodeError: logging.error(f"解析数据源 {url} 失败！"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
+
 def find_new_episodes(last_completed_episode):
     logging.info("正在从数据源获取最新剧集列表..."); data = fetch_data_from_source(DATA_URL)
     if not data: logging.error("获取数据失败，已跳过本次剧集检查。"); return []
@@ -128,8 +167,7 @@ def find_new_episodes(last_completed_episode):
         except ValueError: logging.warning(f"无法解析集数 '{episode_num_str}'，已跳过。")
     new_episodes.sort(key=lambda x: x[0]); return new_episodes
 
-# --- 4. 主工作循环 (逻辑已重构) ---
-# --- 4. 主工作循环 (逻辑已重构，日志已增强) ---
+# --- 4. 主工作循环 (逻辑已重构, 日志已增强) ---
 def run_update_checker():
     logging.info("更新检查器线程已启动...")
     while True:
@@ -140,9 +178,8 @@ def run_update_checker():
         token = get_alist_token()
         if not token:
             logging.warning("无法获取 Alist token，将在下次检查时重试。"); time.sleep(ACTIVE_POLLING_INTERVAL_SECONDS); continue
-
+        
         logging.info("\n--- 阶段一：检查并添加新剧集 ---")
-        # (此部分逻辑不变)
         new_episodes = find_new_episodes(last_completed_episode)
         if not new_episodes: logging.info("未发现需要下载的新剧集。")
         else:
@@ -157,7 +194,7 @@ def run_update_checker():
                             pending_tasks.append({"task_id": task_id, "episode_number": episode_num, "desired_filename": desired_filename, "rename_attempts": 0})
                             save_state({**state, "pending_tasks": pending_tasks}); logging.info(f"剧集 {episode_num} (任务ID: {task_id}) 已添加到待处理列表。"); magnet_found = True; break
                 if not magnet_found: logging.warning(f"在剧集 {episode_num} 中未找到 '简繁日MKV' 格式的下载链接。")
-
+        
         logging.info("\n--- 阶段二：根据转存结果检查任务状态 ---")
         if not pending_tasks:
             logging.info("没有待处理的任务需要检查。")
@@ -166,37 +203,30 @@ def run_update_checker():
             if completed_transfers is None:
                 logging.warning("无法获取 Alist 已完成转存任务列表，将在下次检查时重试。")
             else:
-                # --- 新增日志 ---: 打印所有已完成转存任务的名称，用于调试
                 if completed_transfers:
                     logging.info(f"从 Alist 获取到 {len(completed_transfers)} 个已完成的转存任务名称如下:")
                     for i, transfer in enumerate(completed_transfers):
                         logging.info(f"  {i+1}: {transfer.get('name', 'N/A')}")
-                # --- 日志结束 ---
 
                 tasks_to_remove, state_changed = [], False
                 for task in pending_tasks:
                     episode_num_str = str(task['episode_number']).split('.')[0]
                     match_pattern = f"[SBSUB][CONAN][{episode_num_str}]"
-                    
-                    # --- 新增日志 ---: 打印当前正在寻找的模式
                     logging.info(f"正在为待处理任务 (剧集 {episode_num_str}) 寻找匹配项，搜索模式为: '{match_pattern}'")
-                    # --- 日志结束 ---
 
                     is_completed = False
                     matched_transfer_name = ""
                     for transfer in completed_transfers:
                         transfer_name = transfer.get('name', '')
+                        # 更新：修复匹配逻辑
                         if match_pattern in transfer_name and '.mkv' in transfer_name:
                             is_completed = True
                             matched_transfer_name = transfer_name
                             break
                     
                     if is_completed:
-                        # --- 修改后的日志 ---: 明确指出匹配成功
                         logging.info(f"匹配成功！剧集 {episode_num_str} 的转存任务已完成。匹配到的文件名: '{matched_transfer_name}'")
                         logging.info("开始扫描文件系统并准备重命名...")
-                        # --- 日志结束 ---
-
                         content_in_download_path = list_files(token, DOWNLOAD_PATH)
                         target_file, source_dir, found = None, "", False
                         if content_in_download_path is not None:
@@ -229,9 +259,7 @@ def run_update_checker():
                                 logging.critical(f"剧集 {episode_num_str} 已达到最大重试次数，将放弃该任务！"); tasks_to_remove.append(task)
                         state_changed = True
                     else:
-                        # --- 修改后的日志 ---: 明确指出在检查后未找到匹配项
                         logging.info(f"检查了所有已完成的转存任务后，未能找到剧集 {episode_num_str} 的匹配项。该任务的转存尚未完成或文件名不匹配。")
-                        # --- 日志结束 ---
 
                 if state_changed:
                     state["pending_tasks"] = [p for p in pending_tasks if p not in tasks_to_remove]
@@ -252,7 +280,7 @@ def run_update_checker():
             wait_interval = IDLE_CHECK_INTERVAL_SECONDS
             logging.info(f"\n所有任务已完成。将在常规的 {wait_interval} 秒后进行下一次检查...")
         time.sleep(wait_interval)
-        
+
 # --- 5. Web 服务器 (无变化) ---
 @app.route('/')
 def status_page():
