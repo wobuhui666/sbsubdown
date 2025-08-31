@@ -8,7 +8,7 @@ import logging
 import functools
 from flask import Flask, render_template
 
-# --- 1. 配置模块 (无变化) ---
+# --- 1. 配置模块 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 ALIST_URL = os.getenv("ALIST_URL")
 ALIST_USERNAME = os.getenv("ALIST_USERNAME")
@@ -16,7 +16,8 @@ ALIST_PASSWORD = os.getenv("ALIST_PASSWORD")
 DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH", "/downloads/conan")
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "/data/state.json")
 START_EPISODE = int(os.getenv("START_EPISODE", 0))
-UPDATE_INTERVAL_SECONDS = int(os.getenv("UPDATE_INTERVAL_SECONDS", 3600))
+IDLE_CHECK_INTERVAL_SECONDS = int(os.getenv("IDLE_CHECK_INTERVAL_SECONDS", 3600))  # 默认1小时
+ACTIVE_POLLING_INTERVAL_SECONDS = int(os.getenv("ACTIVE_POLLING_INTERVAL_SECONDS", 600)) # 默认10分钟
 ALIST_TOOL = os.getenv("ALIST_TOOL", "aria2")
 ALIST_DELETE_POLICY = os.getenv("ALIST_DELETE_POLICY", "delete_on_upload_succeed")
 MAX_RENAME_ATTEMPTS = 5
@@ -24,7 +25,7 @@ DATA_URL = "https://cloud.sbsub.com/data/data.json"
 TRACKERS_TO_ADD = ("&tr=http://open.acgtracker.com:1096/announce" "&tr=http://tracker.cyber-gateway.net:6969/announce" "&tr=http://tracker.acgnx.se/announce" "&tr=http://share.camoe.cn:8080/announce" "&tr=http://t.acg.rip:6699/announce" "&tr=https://tr.bangumi.moe:9696/announce" "&tr=https://tracker.forever-legend.net:443/announce" "&tr=https://tracker.gbitt.info:443/announce" "&tr=https://tracker.lilithraws.org:443/announce" "&tr=https://tracker.moe.pm:443/announce")
 app = Flask(__name__)
 
-# --- 2. 通用重试装饰器 (无变化) ---
+# --- 2. 通用重试装饰器 ---
 def retry_on_failure(retries=3, delay=5, allowed_exceptions=(requests.exceptions.RequestException,)):
     def decorator(func):
         @functools.wraps(func)
@@ -41,18 +42,14 @@ def retry_on_failure(retries=3, delay=5, allowed_exceptions=(requests.exceptions
         return wrapper
     return decorator
 
-# --- 3. 核心功能函数 (get_offline_download_tasks 已重写) ---
+# --- 3. 核心功能函数 ---
 def check_env_vars():
     if not all([ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH]):
         logging.error("环境变量 ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH 必须全部设置。")
         sys.exit(1)
 
-# ... 其他函数如 get_alist_token, add_offline_download 等保持不变 ...
-# 为了简洁，这里只显示被修改的函数和它的辅助函数
-
 @retry_on_failure(retries=3, delay=3)
 def _get_task_list_from_v4_api(token, endpoint_url):
-    """辅助函数：从 Alist v4 的任务 API 获取数据"""
     headers = {"Authorization": token}
     try:
         response = requests.get(endpoint_url, headers=headers, timeout=10)
@@ -68,57 +65,26 @@ def _get_task_list_from_v4_api(token, endpoint_url):
         raise
 
 def get_offline_download_tasks(token):
-    """
-    获取 Alist 中的所有离线下载任务 (已适配 Alist v4 API)。
-    """
     logging.info("正在使用 Alist v4 API 获取任务列表...")
     undone_url = f"{ALIST_URL}/api/task/offline_download/undone"
     done_url = f"{ALIST_URL}/api/task/offline_download/done"
-
-    # 分别获取未完成和已完成的任务
     undone_tasks = _get_task_list_from_v4_api(token, undone_url)
-    if undone_tasks is None:
-        return None # 如果请求失败，则直接返回
-
+    if undone_tasks is None: return None
     done_tasks = _get_task_list_from_v4_api(token, done_url)
-    if done_tasks is None:
-        return None
-
+    if done_tasks is None: return None
     raw_tasks = undone_tasks + done_tasks
     transformed_tasks = []
-
     for task in raw_tasks:
-        # --- 数据结构转换层 ---
-        # Alist v4 的 `name` 格式为: "download 文件名 to (目标路径)"
-        # 我们需要从中提取出原始的文件名
         raw_name = task.get("name", "")
         file_name = raw_name
         if raw_name.startswith("download ") and " to (" in raw_name:
-            # 提取 "download " 和 " to (" 之间的部分
             file_name = raw_name.split(" to (", 1)[0][9:]
-
-        # 将 Alist v4 的 `state` 映射为旧逻辑使用的 `status`
         state = task.get("state")
-        status = ""
-        if state == "succeeded":
-            status = "done"
-        elif state == "failed":
-            status = "error"
-        else:
-            status = state  # 如 'running', 'pending', 'canceled'
-
-        transformed_tasks.append({
-            "id": task.get("id"),
-            "name": file_name,
-            "status": status,
-            "error": task.get("error", "")
-        })
-    
+        status = {"succeeded": "done", "failed": "error"}.get(state, state)
+        transformed_tasks.append({"id": task.get("id"), "name": file_name, "status": status, "error": task.get("error", "")})
     logging.info(f"成功获取并转换了 {len(transformed_tasks)} 个任务。")
     return transformed_tasks
 
-# --- 其他未修改的函数 ---
-# 以下是脚本中其他函数的完整实现，它们无需修改
 @retry_on_failure(retries=3, delay=5)
 def get_alist_token():
     login_url = f"{ALIST_URL}/api/auth/login"
@@ -128,7 +94,7 @@ def get_alist_token():
         response.raise_for_status()
         return response.json()["data"]["token"]
     except json.JSONDecodeError:
-        logging.error(f"解析 Alist token 失败！无法将响应解析为 JSON。"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
+        logging.error(f"解析 Alist token 失败！"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
 
 @retry_on_failure(retries=3, delay=3)
 def add_offline_download(token, magnet_link):
@@ -220,10 +186,8 @@ def find_new_episodes(last_completed_episode):
     new_episodes.sort(key=lambda x: x[0])
     return new_episodes
 
-# --- 4. 主工作循环 (无变化) ---
+# --- 4. 主工作循环 ---
 def run_update_checker():
-    # ... 此函数内部的所有逻辑都无需修改，因为它依赖于 get_offline_download_tasks 返回的适配后的数据 ...
-    # (此处省略该函数的完整代码，因为它和上一个版本完全相同)
     logging.info("更新检查器线程已启动...")
     while True:
         logging.info("-" * 30)
@@ -237,7 +201,7 @@ def run_update_checker():
         token = get_alist_token()
         if not token:
             logging.warning("无法获取 Alist token，将在下次检查时重试。")
-            time.sleep(UPDATE_INTERVAL_SECONDS)
+            time.sleep(ACTIVE_POLLING_INTERVAL_SECONDS) # 如果连token都拿不到，应该短时间重试
             continue
 
         logging.info("\n--- 阶段一：检查并添加新剧集 ---")
@@ -245,12 +209,12 @@ def run_update_checker():
         if not new_episodes:
             logging.info("未发现需要下载的新剧集。")
         else:
+            # ... (添加任务逻辑不变) ...
             logging.info(f"发现 {len(new_episodes)} 个新剧集，准备添加到 Alist...")
             for episode_num, episode_info in new_episodes:
                 if any(p.get('episode_number') == episode_num for p in pending_tasks):
                     logging.info(f"剧集 {episode_num} 已在待处理列表中，跳过添加。")
                     continue
-                
                 downloads = episode_info[7].get("WEBRIP", [])
                 magnet_found = False
                 for item in downloads:
@@ -273,24 +237,21 @@ def run_update_checker():
         if not pending_tasks:
             logging.info("没有待处理的任务需要检查。")
         else:
+            # ... (检查任务状态逻辑不变) ...
             alist_tasks = get_offline_download_tasks(token)
             if alist_tasks is None:
                 logging.warning("无法获取 Alist 任务列表，将在下次检查时重试。")
             else:
                 tasks_to_remove, state_changed = [], False
                 alist_tasks_map = {task.get('id'): task for task in alist_tasks}
-
                 for task in pending_tasks:
                     alist_task = alist_tasks_map.get(task["task_id"])
                     if not alist_task: continue
-
                     if alist_task.get("status") == "done":
-                        desired_filename = task.get("desired_filename")
-                        episode_num_str = str(task['episode_number']).split('.')[0]
+                        desired_filename = task.get("desired_filename"); episode_num_str = str(task['episode_number']).split('.')[0]
                         logging.info(f"任务 {task['task_id']} (剧集 {episode_num_str}) 已完成。开始在 '{DOWNLOAD_PATH}' 中扫描下载结果...")
                         content_in_download_path = list_files(token, DOWNLOAD_PATH)
                         target_file, source_dir, found = None, "", False
-                        
                         if content_in_download_path is not None:
                             match_pattern = f"[SBSUB][CONAN][{episode_num_str}]"
                             for item in content_in_download_path:
@@ -308,14 +269,12 @@ def run_update_checker():
                                     target_file, source_dir, found = name, DOWNLOAD_PATH, True
                                     logging.info(f"在主下载目录中找到目标文件: '{target_file}'")
                                 if found: break
-                        
                         rename_success = False
                         if found and target_file:
                             if target_file != desired_filename:
                                 rename_success = rename_file(token, source_dir, target_file, desired_filename)
                             else:
                                 logging.info("文件名已符合要求，无需重命名。"); rename_success = True
-                        
                         if rename_success:
                             tasks_to_remove.append(task)
                         else:
@@ -330,7 +289,6 @@ def run_update_checker():
                         tasks_to_remove.append(task); state_changed = True
                     else:
                         logging.info(f"状态：剧集 {task['episode_number']} 仍在进行中 (状态: {alist_task.get('status')})。")
-
                 if state_changed:
                     state["pending_tasks"] = [p for p in pending_tasks if p not in tasks_to_remove]
                     completed_episodes = {state.get("last_completed_episode", float(START_EPISODE))}
@@ -346,10 +304,18 @@ def run_update_checker():
                     save_state(state)
                     logging.info("状态文件已更新。")
 
-        logging.info(f"\n所有检查完成。等待 {UPDATE_INTERVAL_SECONDS} 秒后进行下一次检查...")
-        time.sleep(UPDATE_INTERVAL_SECONDS)
+        # --- 新的动态休眠逻辑 ---
+        final_state = load_state()
+        if final_state.get("pending_tasks"):
+            wait_interval = ACTIVE_POLLING_INTERVAL_SECONDS
+            logging.info(f"\n发现待处理任务。将在较短的 {wait_interval} 秒后进行下一次检查...")
+        else:
+            wait_interval = IDLE_CHECK_INTERVAL_SECONDS
+            logging.info(f"\n所有任务已完成。将在常规的 {wait_interval} 秒后进行下一次检查...")
+        time.sleep(wait_interval)
 
-# --- 5. Web 服务器 (无变化) ---
+
+# --- 5. Web 服务器 ---
 @app.route('/')
 def status_page():
     state = load_state()
@@ -357,7 +323,7 @@ def status_page():
                            last_episode=state.get('last_completed_episode', 'N/A'), 
                            pending_tasks=state.get('pending_tasks', []))
 
-# --- 6. 启动入口 (无变化) ---
+# --- 6. 启动入口 ---
 if __name__ == "__main__":
     check_env_vars()
     logging.info("脚本启动...")
