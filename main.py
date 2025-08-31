@@ -4,7 +4,13 @@ import json
 import sys
 import time
 import threading
+import logging
 from flask import Flask, render_template
+
+# 配置日志
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    stream=sys.stdout)
 
 # 从环境变量获取 Alist 配置
 ALIST_URL = os.getenv("ALIST_URL")
@@ -37,7 +43,7 @@ app = Flask(__name__)
 def check_env_vars():
     """检查所需的环境变量是否已设置"""
     if not all([ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH]):
-        print("错误：环境变量 ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH 必须全部设置。")
+        logging.error("环境变量 ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH 必须全部设置。")
         sys.exit(1)
 
 def get_alist_token():
@@ -49,7 +55,7 @@ def get_alist_token():
         response.raise_for_status()
         return response.json()["data"]["token"]
     except requests.exceptions.RequestException as e:
-        print(f"获取 Alist token 失败: {e}")
+        logging.error(f"获取 Alist token 失败: {e}")
         return None
 
 def add_offline_download(token, magnet_link):
@@ -71,16 +77,16 @@ def add_offline_download(token, magnet_link):
         task_id = response_data.get("data", {}).get("tasks", [{}])[0].get("id")
         
         if task_id:
-            print(f"成功将任务添加到 Alist 目录 '{DOWNLOAD_PATH}'，任务ID: {task_id}")
+            logging.info(f"成功将任务添加到 Alist 目录 '{DOWNLOAD_PATH}'，任务ID: {task_id}")
             return task_id
         else:
-            print(f"添加下载任务成功，但响应中未找到任务 ID。")
-            print(f"服务器响应: {response.text}")
+            logging.warning(f"添加下载任务成功，但响应中未找到任务 ID。")
+            logging.warning(f"服务器响应: {response.text}")
             return None
     except requests.exceptions.RequestException as e:
-        print(f"添加 Alist 离线下载失败: {e}")
+        logging.error(f"添加 Alist 离线下载失败: {e}")
         if 'response' in locals() and response.text:
-            print(f"服务器响应: {response.text}")
+            logging.error(f"服务器响应: {response.text}")
         return None
 
 def get_offline_download_tasks(token):
@@ -92,10 +98,10 @@ def get_offline_download_tasks(token):
         response.raise_for_status()
         return response.json().get("data", [])
     except requests.exceptions.RequestException as e:
-        print(f"获取 Alist 离线任务列表失败: {e}")
+        logging.error(f"获取 Alist 离线任务列表失败: {e}")
         return None
     except json.JSONDecodeError:
-        print("解析 Alist 任务列表失败。")
+        logging.error("解析 Alist 任务列表失败。")
         return None
 
 def rename_file(token, original_name, new_name):
@@ -111,16 +117,16 @@ def rename_file(token, original_name, new_name):
         response = requests.post(rename_url, headers=headers, json=payload)
         response.raise_for_status()
         if response.json().get("code") == 200:
-            print(f"成功将 '{original_name}' 重命名为 '{new_name}'")
+            logging.info(f"成功将 '{original_name}' 重命名为 '{new_name}'")
             return True
         else:
-            print(f"重命名文件 '{original_name}' 失败。")
-            print(f"服务器响应: {response.text}")
+            logging.error(f"重命名文件 '{original_name}' 失败。")
+            logging.error(f"服务器响应: {response.text}")
             return False
     except requests.exceptions.RequestException as e:
-        print(f"重命名文件 API 请求失败: {e}")
+        logging.error(f"重命名文件 API 请求失败: {e}")
         if 'response' in locals() and response.text:
-            print(f"服务器响应: {response.text}")
+            logging.error(f"服务器响应: {response.text}")
         return False
 
 def load_state():
@@ -130,7 +136,7 @@ def load_state():
             with open(STATE_FILE_PATH, 'r') as f:
                 return json.load(f)
         except (IOError, json.JSONDecodeError) as e:
-            print(f"读取或解析状态文件失败: {e}。将使用默认状态。")
+            logging.warning(f"读取或解析状态文件失败: {e}。将使用默认状态。")
     
     # 默认状态
     return {
@@ -145,21 +151,21 @@ def save_state(state):
         with open(STATE_FILE_PATH, 'w') as f:
             json.dump(state, f, indent=2)
     except IOError as e:
-        print(f"错误：无法写入状态文件 '{STATE_FILE_PATH}': {e}")
+        logging.error(f"无法写入状态文件 '{STATE_FILE_PATH}': {e}")
         sys.exit(1)
 
 def find_new_episodes(last_completed_episode):
     """获取数据并找到所有比记录新的剧集"""
-    print("正在从数据源获取最新剧集列表...")
+    logging.info("正在从数据源获取最新剧集列表...")
     try:
         response = requests.get(DATA_URL)
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as e:
-        print(f"获取数据失败: {e}")
+        logging.error(f"获取数据失败: {e}")
         return []
     except json.JSONDecodeError:
-        print("解析 JSON 数据失败。")
+        logging.error("解析 JSON 数据失败。")
         return []
 
     tv_shows = data.get("res", [])[0][4]
@@ -175,7 +181,7 @@ def find_new_episodes(last_completed_episode):
             if current_episode_num > last_completed_episode:
                 new_episodes.append((current_episode_num, value))
         except ValueError:
-            print(f"警告：无法解析集数 '{episode_num_str}'，已跳过。")
+            logging.warning(f"无法解析集数 '{episode_num_str}'，已跳过。")
             continue
     
     # 按集数从小到大排序
@@ -184,34 +190,34 @@ def find_new_episodes(last_completed_episode):
 
 def run_update_checker():
     """后台运行的更新检查器，采用“添加并验证”模式"""
-    print("更新检查器线程已启动...")
+    logging.info("更新检查器线程已启动...")
     while True:
-        print("-" * 30)
+        logging.info("-" * 30)
         state = load_state()
         last_completed_episode = state.get("last_completed_episode", float(START_EPISODE))
         pending_tasks = state.get("pending_tasks", [])
         
-        print(f"当前最后确认完成的集数是: {last_completed_episode}")
-        print(f"有 {len(pending_tasks)} 个任务待处理。")
+        logging.info(f"当前最后确认完成的集数是: {last_completed_episode}")
+        logging.info(f"有 {len(pending_tasks)} 个任务待处理。")
 
         token = get_alist_token()
         if not token:
-            print("无法获取 Alist token，将在下次检查时重试。")
+            logging.warning("无法获取 Alist token，将在下次检查时重试。")
             time.sleep(UPDATE_INTERVAL_SECONDS)
             continue
 
         # --- 阶段一：检查并添加新剧集 ---
-        print("\n--- 阶段一：检查并添加新剧集 ---")
+        logging.info("\n--- 阶段一：检查并添加新剧集 ---")
         new_episodes = find_new_episodes(last_completed_episode)
 
         if not new_episodes:
-            print("未发现需要下载的新剧集。")
+            logging.info("未发现需要下载的新剧集。")
         else:
-            print(f"发现 {len(new_episodes)} 个新剧集，准备添加到 Alist...")
+            logging.info(f"发现 {len(new_episodes)} 个新剧集，准备添加到 Alist...")
             for episode_num, episode_info in new_episodes:
                 # 检查任务是否已在 pending_tasks 中
                 if any(p.get('episode_number') == episode_num for p in pending_tasks):
-                    print(f"剧集 {episode_num} 已在待处理列表中，跳过添加。")
+                    logging.info(f"剧集 {episode_num} 已在待处理列表中，跳过添加。")
                     continue
 
                 downloads = episode_info[7]
@@ -221,10 +227,10 @@ def run_update_checker():
                     if len(item) > 2 and item[1] == "简繁日MKV":
                         magnet = item[2] + "".join(TRACKERS_TO_ADD)
                         official_episode_num = episode_info[0]
-                        japanese_title = episode_info[2]
-                        desired_filename = f"{official_episode_num} {japanese_title}.mkv"
+                        chinese_title = episode_info[1]  # 使用中文标题
+                        desired_filename = f"{official_episode_num} {chinese_title}.mkv"
                         
-                        print(f"处理新剧集，期望文件名: {desired_filename}")
+                        logging.info(f"处理新剧集 {episode_num}，期望文件名: {desired_filename}")
                         task_id = add_offline_download(token, magnet)
                         
                         if task_id:
@@ -234,21 +240,21 @@ def run_update_checker():
                                 "desired_filename": desired_filename
                             })
                             save_state({**state, "pending_tasks": pending_tasks})
-                            print(f"剧集 {episode_num} (任务ID: {task_id}) 已添加到待处理列表。")
+                            logging.info(f"剧集 {episode_num} (任务ID: {task_id}) 已添加到待处理列表。")
                             magnet_found = True
                             break
                 
                 if not magnet_found:
-                    print(f"警告: 在剧集 {episode_num} 中未找到 '简繁日MKV' 格式的下载链接。")
+                    logging.warning(f"在剧集 {episode_num} 中未找到 '简繁日MKV' 格式的下载链接。")
         
         # --- 阶段二：检查待处理任务的状态 ---
-        print("\n--- 阶段二：检查待处理任务的状态 ---")
+        logging.info("\n--- 阶段二：检查待处理任务的状态 ---")
         if not pending_tasks:
-            print("没有待处理的任务需要检查。")
+            logging.info("没有待处理的任务需要检查。")
         else:
             alist_tasks = get_offline_download_tasks(token)
             if alist_tasks is None:
-                print("无法获取 Alist 任务列表，将在下次检查时重试。")
+                logging.warning("无法获取 Alist 任务列表，将在下次检查时重试。")
             else:
                 tasks_to_remove = []
                 state_changed = False
@@ -262,11 +268,11 @@ def run_update_checker():
                     if not alist_task:
                         # 对于 V2 添加的任务，我们无法验证，只能假设成功
                         if task["task_id"] == "unknown_v2_task":
-                            print(f"警告：无法验证来自 Alist V2 的任务 (剧集 {task['episode_number']})，假设其已完成。")
+                            logging.warning(f"无法验证来自 Alist V2 的任务 (剧集 {task['episode_number']})，假设其已完成。")
                             tasks_to_remove.append(task)
                             state_changed = True
                         else:
-                            print(f"警告：在 Alist 任务列表中未找到任务ID '{task['task_id']}' (剧集 {task['episode_number']})。可能已被手动删除。")
+                            logging.warning(f"在 Alist 任务列表中未找到任务ID '{task['task_id']}' (剧集 {task['episode_number']})。可能已被手动删除。")
                         continue
 
                     status = alist_task.get("status")
@@ -274,29 +280,29 @@ def run_update_checker():
                         original_filename = alist_task.get("name")
                         desired_filename = task.get("desired_filename")
                         
-                        print(f"确认：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 已下载完成。原始文件名: '{original_filename}'")
+                        logging.info(f"确认：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 已下载完成。原始文件名: '{original_filename}'")
 
                         # 执行重命名
                         if original_filename and desired_filename and original_filename != desired_filename:
-                            print(f"准备将 '{original_filename}' 重命名为 '{desired_filename}'...")
+                            logging.info(f"准备将 '{original_filename}' 重命名为 '{desired_filename}'...")
                             rename_success = rename_file(token, original_filename, desired_filename)
                             if rename_success:
                                 # 只有重命名成功后才移除任务
                                 tasks_to_remove.append(task)
                                 state_changed = True
                             else:
-                                print(f"重命名失败，任务 {task['task_id']} 将在下次检查时重试。")
+                                logging.error(f"重命名失败，任务 {task['task_id']} 将在下次检查时重试。")
                         else:
                             # 如果不需要重命名，也视为成功
                             tasks_to_remove.append(task)
                             state_changed = True
 
                     elif status == "error":
-                        print(f"错误：剧集 {task['episode_number']} (任务ID: {task['task_id']}) 下载失败。错误信息: {alist_task.get('error')}")
+                        logging.error(f"剧集 {task['episode_number']} (任务ID: {task['task_id']}) 下载失败。错误信息: {alist_task.get('error')}")
                         tasks_to_remove.append(task)
                         state_changed = True
                     else:
-                        print(f"状态：剧集 {task['episode_number']} 仍在下载中 (状态: {status})。")
+                        logging.info(f"状态：剧集 {task['episode_number']} 仍在下载中 (状态: {status})。")
 
                 if state_changed:
                     # 更新 pending_tasks 列表
@@ -315,12 +321,12 @@ def run_update_checker():
                         new_last_completed = max(completed_episodes)
                         if new_last_completed > state["last_completed_episode"]:
                             state["last_completed_episode"] = new_last_completed
-                            print(f"更新最后完成的集数为: {new_last_completed}")
+                            logging.info(f"更新最后完成的集数为: {new_last_completed}")
 
                     save_state(state)
-                    print("状态文件已更新。")
+                    logging.info("状态文件已更新。")
 
-        print(f"\n所有检查完成。等待 {UPDATE_INTERVAL_SECONDS} 秒后进行下一次检查...")
+        logging.info(f"\n所有检查完成。等待 {UPDATE_INTERVAL_SECONDS} 秒后进行下一次检查...")
         time.sleep(UPDATE_INTERVAL_SECONDS)
 
 @app.route('/')
@@ -333,7 +339,7 @@ def status_page():
 
 if __name__ == "__main__":
     check_env_vars()
-    print("脚本启动...")
+    logging.info("脚本启动...")
     
     # 在后台线程中运行更新检查器
     checker_thread = threading.Thread(target=run_update_checker, daemon=True)
