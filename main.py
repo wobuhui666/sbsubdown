@@ -66,7 +66,7 @@ def retry_on_failure(retries=3, delay=5, allowed_exceptions=(requests.exceptions
         return wrapper
     return decorator
 
-# --- 3. 核心功能函数 ---
+# --- 3. 核心功能函数 (带增强诊断) ---
 def check_env_vars():
     """检查所需的环境变量是否已设置"""
     if not all([ALIST_URL, ALIST_USERNAME, ALIST_PASSWORD, DOWNLOAD_PATH, STATE_FILE_PATH]):
@@ -78,9 +78,15 @@ def get_alist_token():
     """获取 Alist API token"""
     login_url = f"{ALIST_URL}/api/auth/login"
     payload = {"username": ALIST_USERNAME, "password": ALIST_PASSWORD}
-    response = requests.post(login_url, json=payload, timeout=10)
-    response.raise_for_status()
-    return response.json()["data"]["token"]
+    try:
+        response = requests.post(login_url, json=payload, timeout=10)
+        response.raise_for_status()
+        return response.json()["data"]["token"]
+    except json.JSONDecodeError:
+        logging.error(f"解析 Alist token 失败！无法将响应解析为 JSON。")
+        logging.error(f"服务器状态码: {response.status_code}")
+        logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}")
+        raise # 重新抛出异常以触发重试
 
 @retry_on_failure(retries=3, delay=3)
 def add_offline_download(token, magnet_link):
@@ -88,24 +94,39 @@ def add_offline_download(token, magnet_link):
     download_url = f"{ALIST_URL}/api/fs/add_offline_download"
     headers = {"Authorization": token}
     payload = {"path": DOWNLOAD_PATH, "urls": [magnet_link], "tool": ALIST_TOOL, "delete_policy": ALIST_DELETE_POLICY}
-    response = requests.post(download_url, headers=headers, json=payload, timeout=10)
-    response.raise_for_status()
-    response_data = response.json()
-    task_id = response_data.get("data", {}).get("tasks", [{}])[0].get("id")
-    if task_id:
-        logging.info(f"成功将任务添加到 Alist 目录 '{DOWNLOAD_PATH}'，任务ID: {task_id}")
-        return task_id
-    logging.warning(f"添加下载任务成功，但响应中未找到任务 ID。响应: {response.text}")
-    return None
+    try:
+        response = requests.post(download_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        response_data = response.json()
+        task_id = response_data.get("data", {}).get("tasks", [{}])[0].get("id")
+        if task_id:
+            logging.info(f"成功将任务添加到 Alist 目录 '{DOWNLOAD_PATH}'，任务ID: {task_id}")
+            return task_id
+        logging.warning(f"添加下载任务成功，但响应中未找到任务 ID。响应: {response.text}")
+        return None
+    except json.JSONDecodeError:
+        logging.error(f"解析 Alist 添加任务响应失败！")
+        logging.error(f"服务器状态码: {response.status_code}")
+        logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}")
+        raise
 
 @retry_on_failure(retries=3, delay=3)
 def get_offline_download_tasks(token):
     """获取 Alist 中的所有离线下载任务"""
     tasks_url = f"{ALIST_URL}/api/fs/offline_download_tasks"
     headers = {"Authorization": token}
-    response = requests.get(tasks_url, headers=headers, timeout=10)
-    response.raise_for_status()
-    return response.json().get("data", [])
+    try:
+        response = requests.get(tasks_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        if not response.text:
+            logging.error(f"从 {tasks_url} 收到的响应为空。")
+            return [] # 视为空列表
+        return response.json().get("data", [])
+    except json.JSONDecodeError:
+        logging.error(f"解析 Alist 任务列表失败！无法将响应解析为 JSON。")
+        logging.error(f"服务器状态码: {response.status_code}")
+        logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}")
+        raise # 重新抛出以触发重试
 
 @retry_on_failure(retries=3, delay=2)
 def list_files(token, path):
@@ -113,13 +134,22 @@ def list_files(token, path):
     list_url = f"{ALIST_URL}/api/fs/list"
     headers = {"Authorization": token}
     payload = {"path": path, "page": 1, "per_page": 0}
-    response = requests.post(list_url, headers=headers, json=payload, timeout=15)
-    response.raise_for_status()
-    response_data = response.json()
-    if response_data.get("code") == 200:
-        return response_data.get("data", {}).get("content", [])
-    logging.error(f"列出目录 '{path}' 文件失败。服务器响应: {response.text}")
-    return None
+    try:
+        response = requests.post(list_url, headers=headers, json=payload, timeout=15)
+        response.raise_for_status()
+        if not response.text:
+            logging.error(f"从 {list_url} (路径: {path}) 收到的响应为空。")
+            return None
+        response_data = response.json()
+        if response_data.get("code") == 200:
+            return response_data.get("data", {}).get("content", [])
+        logging.error(f"列出目录 '{path}' 文件失败。服务器响应: {response.text}")
+        return None
+    except json.JSONDecodeError:
+        logging.error(f"解析 Alist 目录列表失败！")
+        logging.error(f"服务器状态码: {response.status_code}")
+        logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}")
+        raise
 
 @retry_on_failure(retries=3, delay=2)
 def rename_file(token, src_directory, original_name, new_name):
@@ -127,13 +157,19 @@ def rename_file(token, src_directory, original_name, new_name):
     rename_url = f"{ALIST_URL}/api/fs/rename"
     headers = {"Authorization": token}
     payload = {"src_dir": src_directory, "name": original_name, "new_name": new_name}
-    response = requests.post(rename_url, headers=headers, json=payload, timeout=10)
-    response.raise_for_status()
-    if response.json().get("code") == 200:
-        logging.info(f"成功将 '{original_name}' 重命名为 '{new_name}'")
-        return True
-    logging.error(f"重命名文件 '{original_name}' 失败。服务器响应: {response.text}")
-    return False
+    try:
+        response = requests.post(rename_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        if response.json().get("code") == 200:
+            logging.info(f"成功将 '{original_name}' 重命名为 '{new_name}'")
+            return True
+        logging.error(f"重命名文件 '{original_name}' 失败。服务器响应: {response.text}")
+        return False
+    except json.JSONDecodeError:
+        logging.error(f"解析 Alist 重命名响应失败！")
+        logging.error(f"服务器状态码: {response.status_code}")
+        logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}")
+        raise
 
 def load_state():
     """从 state.json 加载状态，如果不存在则创建"""
@@ -155,12 +191,18 @@ def save_state(state):
         logging.error(f"无法写入状态文件 '{STATE_FILE_PATH}': {e}")
         sys.exit(1)
 
-@retry_on_failure(retries=3, delay=10, allowed_exceptions=(requests.exceptions.RequestException, json.JSONDecodeError))
+@retry_on_failure(retries=3, delay=10)
 def fetch_data_from_source(url):
     """专门用于获取数据源的函数，以便应用重试逻辑"""
-    response = requests.get(url, timeout=15)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        return response.json()
+    except json.JSONDecodeError:
+        logging.error(f"解析数据源 {url} 失败！")
+        logging.error(f"服务器状态码: {response.status_code}")
+        logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}")
+        raise
 
 def find_new_episodes(last_completed_episode):
     """获取数据并找到所有比记录新的剧集"""
@@ -225,7 +267,7 @@ def run_update_checker():
                                 "task_id": task_id,
                                 "episode_number": episode_num,
                                 "desired_filename": desired_filename,
-                                "rename_attempts": 0  # 初始化重试计数
+                                "rename_attempts": 0
                             })
                             save_state({**state, "pending_tasks": pending_tasks})
                             logging.info(f"剧集 {episode_num} (任务ID: {task_id}) 已添加到待处理列表。")
@@ -309,10 +351,9 @@ def run_update_checker():
 
                 if state_changed:
                     state["pending_tasks"] = [p for p in pending_tasks if p not in tasks_to_remove]
-                    completed_episodes = {state["last_completed_episode"]}
+                    completed_episodes = {state.get("last_completed_episode", float(START_EPISODE))}
                     for removed_task in tasks_to_remove:
                         alist_task = alist_tasks_map.get(removed_task["task_id"])
-                        # 仅当任务成功（或被放弃）时，才将其视为可更新last_completed_episode的候选
                         if (alist_task and alist_task.get("status") == "done") or removed_task.get('rename_attempts', 0) >= MAX_RENAME_ATTEMPTS:
                              completed_episodes.add(removed_task["episode_number"])
                     
@@ -342,27 +383,43 @@ if __name__ == "__main__":
     check_env_vars()
     logging.info("脚本启动...")
     
+    # 确保 templates 文件夹存在
+    if not os.path.exists("templates"):
+        os.makedirs("templates")
+    
+    # 确保 index.html 文件存在
+    index_html_path = os.path.join("templates", "index.html")
+    if not os.path.exists(index_html_path):
+        with open(index_html_path, "w", encoding="utf-8") as f:
+            f.write("""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>下载器状态</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 2em; }
+        h1, h2 { color: #333; }
+        ul { list-style-type: none; padding-left: 0; }
+        li { background: #f4f4f4; margin-bottom: 5px; padding: 10px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+  <h1>Alist 自动下载器状态</h1>
+  <p><strong>最新完成的剧集:</strong> {{ last_episode }}</p>
+  <h2>待处理任务 ({{ pending_tasks|length }})</h2>
+  <ul>
+    {% for task in pending_tasks %}
+      <li>剧集 {{ task.episode_number }} (任务ID: {{ task.task_id }}) - 重命名尝试: {{ task.rename_attempts }} / """ + str(MAX_RENAME_ATTEMPTS) + """</li>
+    {% else %}
+      <li>无待处理任务</li>
+    {% endfor %}
+  </ul>
+</body>
+</html>""")
+
     # 在后台线程中运行更新检查器
     checker_thread = threading.Thread(target=run_update_checker, daemon=True)
     checker_thread.start()
     
-    # 启动 Flask web 服务器 (需要一个 templates/index.html 文件)
-    # 请确保您有一个名为 "templates" 的文件夹，并且其中包含一个 "index.html" 文件。
-    # 一个简单的 index.html 示例:
-    # <!DOCTYPE html>
-    # <html>
-    # <head><title>下载器状态</title></head>
-    # <body>
-    #   <h1>下载器状态</h1>
-    #   <p>最新完成的剧集: {{ last_episode }}</p>
-    #   <h2>待处理任务:</h2>
-    #   <ul>
-    #     {% for task in pending_tasks %}
-    #       <li>剧集 {{ task.episode_number }} (任务ID: {{ task.task_id }}) - 重命名尝试: {{ task.rename_attempts }}</li>
-    #     {% else %}
-    #       <li>无待处理任务</li>
-    #     {% endfor %}
-    #   </ul>
-    # </body>
-    # </html>
+    # 启动 Flask web 服务器
     app.run(host='0.0.0.0', port=5000)
