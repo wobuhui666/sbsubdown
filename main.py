@@ -104,9 +104,15 @@ def load_state():
         except (IOError, json.JSONDecodeError) as e: logging.warning(f"读取或解析状态文件失败: {e}。将使用默认状态。")
     return {"last_completed_episode": float(START_EPISODE), "pending_tasks": []}
 def save_state(state):
-    try: os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True);
-        with open(STATE_FILE_PATH, 'w') as f: json.dump(state, f, indent=2)
-    except IOError as e: logging.error(f"无法写入状态文件 '{STATE_FILE_PATH}': {e}"); sys.exit(1)
+    try:
+        # 确保目录存在
+        os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True)
+        # 写入状态文件，注意这里的缩进和上一行是一致的
+        with open(STATE_FILE_PATH, 'w') as f:
+            json.dump(state, f, indent=2)
+    except IOError as e:
+        logging.error(f"无法写入状态文件 '{STATE_FILE_PATH}': {e}")
+        sys.exit(1)
 @retry_on_failure(retries=3, delay=10)
 def fetch_data_from_source(url):
     try: response = requests.get(url, timeout=15); response.raise_for_status(); return response.json()
