@@ -186,7 +186,7 @@ def run_update_checker():
                     matched_transfer_name = ""
                     for transfer in completed_transfers:
                         transfer_name = transfer.get('name', '')
-                        if match_pattern in transfer_name and transfer_name.endswith('.mkv'):
+                        if match_pattern in transfer_name and '.mkv' in transfer_name:
                             is_completed = True
                             matched_transfer_name = transfer_name
                             break
