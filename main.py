@@ -65,6 +65,9 @@ def _get_task_list_from_v4_api(token, endpoint_url):
         raise
 
 def get_offline_download_tasks(token):
+    """
+    获取 Alist 中的所有离线下载任务 (已适配 Alist v4 API，并增加诊断日志)。
+    """
     logging.info("正在使用 Alist v4 API 获取任务列表...")
     undone_url = f"{ALIST_URL}/api/task/offline_download/undone"
     done_url = f"{ALIST_URL}/api/task/offline_download/done"
@@ -72,7 +75,14 @@ def get_offline_download_tasks(token):
     if undone_tasks is None: return None
     done_tasks = _get_task_list_from_v4_api(token, done_url)
     if done_tasks is None: return None
+    
     raw_tasks = undone_tasks + done_tasks
+
+    # --- 新增的诊断日志 ---
+    # 打印从 Alist 获取到的最原始、未处理的任务数据，以确认完成状态的真实值
+    logging.info(f"从 Alist API 获取到的原始任务数据: {json.dumps(raw_tasks, indent=2, ensure_ascii=False)}")
+    # --- 诊断日志结束 ---
+
     transformed_tasks = []
     for task in raw_tasks:
         raw_name = task.get("name", "")
@@ -82,6 +92,7 @@ def get_offline_download_tasks(token):
         state = task.get("state")
         status = {"succeeded": "done", "failed": "error"}.get(state, state)
         transformed_tasks.append({"id": task.get("id"), "name": file_name, "status": status, "error": task.get("error", "")})
+    
     logging.info(f"成功获取并转换了 {len(transformed_tasks)} 个任务。")
     return transformed_tasks
 
@@ -209,7 +220,6 @@ def run_update_checker():
         if not new_episodes:
             logging.info("未发现需要下载的新剧集。")
         else:
-            # ... (添加任务逻辑不变) ...
             logging.info(f"发现 {len(new_episodes)} 个新剧集，准备添加到 Alist...")
             for episode_num, episode_info in new_episodes:
                 if any(p.get('episode_number') == episode_num for p in pending_tasks):
@@ -237,7 +247,6 @@ def run_update_checker():
         if not pending_tasks:
             logging.info("没有待处理的任务需要检查。")
         else:
-            # ... (检查任务状态逻辑不变) ...
             alist_tasks = get_offline_download_tasks(token)
             if alist_tasks is None:
                 logging.warning("无法获取 Alist 任务列表，将在下次检查时重试。")
