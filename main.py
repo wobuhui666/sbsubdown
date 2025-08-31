@@ -92,40 +92,39 @@ def list_files(token, path):
     except json.JSONDecodeError: logging.error(f"解析 Alist 目录列表失败！"); logging.error(f"服务器状态码: {response.status_code}"); logging.error(f"服务器原始响应 (前500字符): {response.text[:500]}"); raise
 
 # 更新：最关键的修复，重写 rename_file 函数
+# 更新：最终修正版，根据用户成功的 API 请求重构 rename_file 函数
 @retry_on_failure(retries=3, delay=2)
 def rename_file(token, src_directory, original_name, new_name):
     """
-    增强版重命名函数：自动规范化源目录路径，确保其包含挂载点。
+    最终修正版重命名函数：
+    使用 'path' 和 'name' 字段来构建请求体，以匹配当前 Alist API 的要求。
     """
-    # --- 新增的路径规范化逻辑 ---
-    normalized_src_dir = src_directory
-    # 确保 ALIST_MOUNT_PATH 结尾没有斜杠，以避免拼接时产生双斜杠
-    mount_path_stripped = ALIST_MOUNT_PATH.rstrip('/')
-    
-    # 检查传入的目录是否已经以正确的挂载路径开头
-    if not src_directory.startswith(mount_path_stripped + '/') and src_directory != mount_path_stripped:
-        # 如果不是，则强制将它们拼接起来
-        src_dir_stripped = src_directory.lstrip('/')
-        normalized_src_dir = f"{mount_path_stripped}/{src_dir_stripped}"
-        logging.warning(f"检测到原始 src_dir '{src_directory}' 不规范，已自动修正为: '{normalized_src_dir}'")
-    # --- 逻辑结束 ---
+    # 步骤 1: 构建 Alist API 需要的 'path' 字段，即源文件的完整路径
+    # os.path.join 能够智能地处理路径拼接
+    full_original_path = os.path.join(src_directory, original_name)
+
+    # 步骤 2: 构建新的、正确的请求体 (payload)
+    payload = {
+        "path": full_original_path,
+        "name": new_name
+    }
 
     rename_url = f"{ALIST_URL}/api/fs/rename"
+    # requests 库在使用 json=... 参数时，会自动设置 Content-Type 为 application/json
+    # 并且正确处理 UTF-8 编码，所以我们无需手动设置 headers
     headers = {"Authorization": token}
-    # 使用修正后的路径
-    payload = {"src_dir": normalized_src_dir, "name": original_name, "new_name": new_name}
     
     try:
-        # 增加日志，打印出最终发送给 Alist 的载荷
-        logging.info(f"正在发送重命名请求到 Alist，载荷: {json.dumps(payload)}")
+        # 更新日志，打印出我们最终发送的、格式正确的载荷
+        logging.info(f"正在发送【新格式】重命名请求到 Alist，载荷: {json.dumps(payload, ensure_ascii=False)}")
         
         response = requests.post(rename_url, headers=headers, json=payload, timeout=10)
         response.raise_for_status()
-        response_data = response.json() # 提前解析json
+        response_data = response.json()
         if response_data.get("code") == 200:
             logging.info(f"成功将 '{original_name}' 重命名为 '{new_name}'")
             return True
-        # 如果code不是200，也记录详细信息
+        
         logging.error(f"重命名文件 '{original_name}' 失败。服务器响应: {response.text}")
         return False
     except json.JSONDecodeError:
