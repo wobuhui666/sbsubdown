@@ -129,6 +129,7 @@ def find_new_episodes(last_completed_episode):
     new_episodes.sort(key=lambda x: x[0]); return new_episodes
 
 # --- 4. 主工作循环 (逻辑已重构) ---
+# --- 4. 主工作循环 (逻辑已重构，日志已增强) ---
 def run_update_checker():
     logging.info("更新检查器线程已启动...")
     while True:
@@ -139,7 +140,7 @@ def run_update_checker():
         token = get_alist_token()
         if not token:
             logging.warning("无法获取 Alist token，将在下次检查时重试。"); time.sleep(ACTIVE_POLLING_INTERVAL_SECONDS); continue
-        
+
         logging.info("\n--- 阶段一：检查并添加新剧集 ---")
         # (此部分逻辑不变)
         new_episodes = find_new_episodes(last_completed_episode)
@@ -156,7 +157,7 @@ def run_update_checker():
                             pending_tasks.append({"task_id": task_id, "episode_number": episode_num, "desired_filename": desired_filename, "rename_attempts": 0})
                             save_state({**state, "pending_tasks": pending_tasks}); logging.info(f"剧集 {episode_num} (任务ID: {task_id}) 已添加到待处理列表。"); magnet_found = True; break
                 if not magnet_found: logging.warning(f"在剧集 {episode_num} 中未找到 '简繁日MKV' 格式的下载链接。")
-        
+
         logging.info("\n--- 阶段二：根据转存结果检查任务状态 ---")
         if not pending_tasks:
             logging.info("没有待处理的任务需要检查。")
@@ -165,17 +166,37 @@ def run_update_checker():
             if completed_transfers is None:
                 logging.warning("无法获取 Alist 已完成转存任务列表，将在下次检查时重试。")
             else:
+                # --- 新增日志 ---: 打印所有已完成转存任务的名称，用于调试
+                if completed_transfers:
+                    logging.info(f"从 Alist 获取到 {len(completed_transfers)} 个已完成的转存任务名称如下:")
+                    for i, transfer in enumerate(completed_transfers):
+                        logging.info(f"  {i+1}: {transfer.get('name', 'N/A')}")
+                # --- 日志结束 ---
+
                 tasks_to_remove, state_changed = [], False
                 for task in pending_tasks:
                     episode_num_str = str(task['episode_number']).split('.')[0]
                     match_pattern = f"[SBSUB][CONAN][{episode_num_str}]"
+                    
+                    # --- 新增日志 ---: 打印当前正在寻找的模式
+                    logging.info(f"正在为待处理任务 (剧集 {episode_num_str}) 寻找匹配项，搜索模式为: '{match_pattern}'")
+                    # --- 日志结束 ---
+
                     is_completed = False
+                    matched_transfer_name = ""
                     for transfer in completed_transfers:
-                        if match_pattern in transfer.get('name', '') and transfer.get('name', '').endswith('.mkv'):
-                            is_completed = True; break
+                        transfer_name = transfer.get('name', '')
+                        if match_pattern in transfer_name and transfer_name.endswith('.mkv'):
+                            is_completed = True
+                            matched_transfer_name = transfer_name
+                            break
                     
                     if is_completed:
-                        logging.info(f"检测到剧集 {episode_num_str} 的转存任务已完成，开始扫描文件并准备重命名...")
+                        # --- 修改后的日志 ---: 明确指出匹配成功
+                        logging.info(f"匹配成功！剧集 {episode_num_str} 的转存任务已完成。匹配到的文件名: '{matched_transfer_name}'")
+                        logging.info("开始扫描文件系统并准备重命名...")
+                        # --- 日志结束 ---
+
                         content_in_download_path = list_files(token, DOWNLOAD_PATH)
                         target_file, source_dir, found = None, "", False
                         if content_in_download_path is not None:
@@ -208,7 +229,9 @@ def run_update_checker():
                                 logging.critical(f"剧集 {episode_num_str} 已达到最大重试次数，将放弃该任务！"); tasks_to_remove.append(task)
                         state_changed = True
                     else:
-                        logging.info(f"剧集 {episode_num_str} 的转存任务尚未完成。")
+                        # --- 修改后的日志 ---: 明确指出在检查后未找到匹配项
+                        logging.info(f"检查了所有已完成的转存任务后，未能找到剧集 {episode_num_str} 的匹配项。该任务的转存尚未完成或文件名不匹配。")
+                        # --- 日志结束 ---
 
                 if state_changed:
                     state["pending_tasks"] = [p for p in pending_tasks if p not in tasks_to_remove]
@@ -229,7 +252,7 @@ def run_update_checker():
             wait_interval = IDLE_CHECK_INTERVAL_SECONDS
             logging.info(f"\n所有任务已完成。将在常规的 {wait_interval} 秒后进行下一次检查...")
         time.sleep(wait_interval)
-
+        
 # --- 5. Web 服务器 (无变化) ---
 @app.route('/')
 def status_page():
