@@ -63,9 +63,9 @@ docker run -d --restart=always \
   -e ALIST_URL="http://your-alist-url:5244" \
   -e ALIST_USERNAME="your-username" \
   -e ALIST_PASSWORD="your-password" \
-  -e DOWNLOAD_PATH="/downloads/conan" \
+  -e DOWNLOAD_PATH="/downloads/conan（要上传到的文件夹）" \
   -e ALIST_TOOL="aria2" \
-  -e UPDATE_INTERVAL_SECONDS="1800" \
+  -e ALIST_MOUNT_PATH="/downloads（要上传到的文件夹的第一层路径）" \
   -v ./my_data:/data \
   --name sbsubdown \
   sbsubdown
